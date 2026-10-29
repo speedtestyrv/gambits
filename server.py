@@ -218,6 +218,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_sound(self, name):
+        # tikai skaņu faili ar drošu nosaukumu: snd_<vārds>.ogg vai .wav
+        base, _, ext = name.rpartition(".")
+        if ext not in ("ogg", "wav") or not base.startswith("snd_") or not base[4:].isalnum():
+            return self.send_json({"error": "Nav atrasts"}, 404)
+        for folder in (os.path.join(ROOT, "sounds"), ROOT):
+            path = os.path.join(folder, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/ogg" if ext == "ogg" else "audio/wav")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "public, max-age=604800")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        self.send_json({"error": "Nav atrasts"}, 404)
+
     def read_json(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n > 20000:
@@ -237,6 +256,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/" or url.path.startswith("/g/") or url.path.startswith("/f/"):
             return self.send_index()
+        if url.path.startswith("/s/"):
+            return self.send_sound(url.path[3:])
         if url.path == "/health":
             return self.send_json({"ok": True, "games": len(games)})
         if url.path == "/api/lobby":

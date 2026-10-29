@@ -283,7 +283,7 @@ footer a{color:#6b665e}
   </aside>
 </main>
 
-<footer>Figūras: „cburnett” (CC BY-SA 3.0), gājienu loģika: chess.js</footer>
+<footer>Figūras: „cburnett” (CC BY-SA 3.0) · skaņas: <a href="https://github.com/pychess/pychess" target="_blank" rel="noopener">PyChess</a> (GPL-3.0) · gājienu loģika: chess.js</footer>
 <div class="toast" id="toast"></div>
 
 <script type="module">
@@ -317,88 +317,71 @@ async function api(path, body){
 }
 
 /* ---------- skaņas (bez failiem, ģenerētas) ---------- */
-let actx, master, noiseBuf;
+let actx, master;
 let muted = store.get('gambits:mute') === '1';
+/* ierakstītas šaha skaņas (PyChess, GPL-3.0), ielādētas vienreiz un atskaņotas bez aiztures */
+const SND_FILES = {
+  move:'move1', moveOpp:'mov2', capture:'capture2', castle:'castle', check:'check1',
+  start:'start1', win:'win1', lose:'lose1', draw:'draw1', notify:'choice', premove:'choice', invalid:'invalid',
+};
+const SND_VOL = {premove:.35, notify:.7, invalid:.5};
+const buffers = {};
+let loading = null;
+function loadSounds(){
+  if(loading || !actx) return loading;
+  const ext = new Audio().canPlayType('audio/ogg; codecs="vorbis"') ? 'ogg' : 'wav';
+  const names = [...new Set(Object.values(SND_FILES))];
+  loading = Promise.all(names.map(async n => {
+    try{
+      const data = await (await fetch(`/s/snd_${n}.${ext}`)).arrayBuffer();
+      buffers[n] = await new Promise((ok, bad) => actx.decodeAudioData(data, ok, bad));
+    }catch{}
+  }));
+  return loading;
+}
 function unlockAudio(){
   try{
     if(!actx){
       actx = new AudioContext();
-      const comp = actx.createDynamicsCompressor();
-      comp.threshold.value = -14; comp.ratio.value = 4;
-      master = actx.createGain(); master.gain.value = .9;
-      master.connect(comp).connect(actx.destination);
-      // īsa telpas atbalss, lai skaņa neizklausās „sausa”
-      const len = actx.sampleRate * .35;
-      noiseBuf = actx.createBuffer(1, actx.sampleRate * .2, actx.sampleRate);
-      const nd = noiseBuf.getChannelData(0);
-      for(let i=0;i<nd.length;i++) nd[i] = Math.random()*2-1;
-      const ir = actx.createBuffer(2, len, actx.sampleRate);
-      for(let ch=0;ch<2;ch++){ const d = ir.getChannelData(ch); for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, 3) * .5; }
-      const rev = actx.createConvolver(); rev.buffer = ir;
-      const wet = actx.createGain(); wet.gain.value = .16;
-      master.connect(rev).connect(wet).connect(comp);
+      master = actx.createGain(); master.gain.value = 1;
+      master.connect(actx.destination);
+      loadSounds();
     }
     actx.resume();
   }catch{}
 }
 addEventListener('pointerdown', unlockAudio);
-const ready = () => actx && !muted;
-function env(g, t, peak, attack, decay){
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(peak, t + attack);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
-}
-/* koka figūra uz koka galdiņa: trokšņa uzsitiens + koka rezonanses + zems pamats */
-function clack(delay = 0, pitch = 1, vol = 1){
-  if(!ready()) return;
-  const t = actx.currentTime + delay;
-  const n = actx.createBufferSource(); n.buffer = noiseBuf; n.playbackRate.value = pitch;
-  const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 900;
-  const bp = actx.createBiquadFilter(); bp.type = 'peaking'; bp.frequency.value = 3200*pitch; bp.gain.value = 6;
-  const ng = actx.createGain(); env(ng, t, .55*vol, .001, .028);
-  n.connect(hp).connect(bp).connect(ng).connect(master); n.start(t); n.stop(t + .06);
-  [[620, .09, .3], [1450, .055, .16], [2630, .035, .09], [3900, .02, .05]].forEach(([f, d, a]) => {
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.frequency.value = f * pitch * (1 + (Math.random()-.5)*.03);
-    env(g, t, a*vol, .0015, d);
-    o.connect(g).connect(master); o.start(t); o.stop(t + d + .02);
-  });
-  const b = actx.createOscillator(), bg = actx.createGain();
-  b.frequency.setValueAtTime(170*pitch, t); b.frequency.exponentialRampToValueAtTime(70, t + .08);
-  env(bg, t, .5*vol, .002, .09);
-  b.connect(bg).connect(master); b.start(t); b.stop(t + .12);
-}
-function bell(freq, delay = 0, dur = .6, vol = .16, type = 'sine'){
-  if(!ready()) return;
-  const t = actx.currentTime + delay;
-  [[1, 1], [2.01, .35], [3.02, .12]].forEach(([m, a]) => {
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = type; o.frequency.value = freq * m;
-    env(g, t, vol*a, .008, dur / m);
-    o.connect(g).connect(master); o.start(t); o.stop(t + dur + .05);
-  });
+addEventListener('keydown', unlockAudio);
+function play(kind, delay = 0){
+  if(!actx || muted) return;
+  const buf = buffers[SND_FILES[kind]];
+  if(!buf) return;
+  const src = actx.createBufferSource(), g = actx.createGain();
+  src.buffer = buf; g.gain.value = SND_VOL[kind] ?? 1;
+  src.connect(g).connect(master);
+  src.start(actx.currentTime + delay);
 }
 const sound = {
-  move(){ clack(0, 1, 1) },
-  capture(){ clack(0, .82, 1.25); clack(.035, 1.18, .55) },
-  castle(){ clack(0, 1, .95); clack(.12, 1.08, .8) },
-  promote(){ clack(0, 1, 1); bell(784, .05, .4, .1); bell(1175, .13, .5, .1) },
-  check(){ clack(0, 1.05, 1); bell(1320, .03, .45, .09, 'triangle') },
-  premove(){ clack(0, 1.4, .35) },
-  start(){ bell(523, 0, .5, .12); bell(784, .12, .7, .12) },
-  win(){ [523, 659, 784, 1047].forEach((f, i) => bell(f, i*.11, .8, .12, 'triangle')) },
-  lose(){ [659, 523, 440].forEach((f, i) => bell(f, i*.16, .8, .11)) },
-  draw(){ bell(659, 0, .6, .11); bell(659, .18, .7, .09) },
-  notify(){ bell(880, 0, .4, .1); bell(1175, .1, .5, .1) },
-  tick(){ if(!ready()) return; const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = 1900; env(g, t, .12, .001, .03); o.connect(g).connect(master); o.start(t); o.stop(t + .05); },
+  move(mine = true){ play(mine ? 'move' : 'moveOpp') },
+  capture(){ play('capture') },
+  castle(){ play('castle') },
+  promote(){ play('move'); play('notify', .08) },
+  check(){ play('check') },
+  premove(){ play('premove') },
+  start(){ play('start') },
+  win(){ play('win') },
+  lose(){ play('lose') },
+  draw(){ play('draw') },
+  notify(){ play('notify') },
+  tick(){ play('invalid') },
 };
-function playFor(m, pos){
+function playFor(m, pos, mine = true){
   if(!m) return;
   if(pos.inCheck()) sound.check();
   else if(m.promotion) sound.promote();
   else if(m.flags.includes('k') || m.flags.includes('q')) sound.castle();
   else if(m.captured) sound.capture();
-  else sound.move();
+  else sound.move(mine);
 }
 
 /* konfeti uzvarai */
@@ -785,11 +768,9 @@ function initGame(id){
       el.textContent = fmt(c[col]);
       const act = !st.result && S.chess.turn()===col && st.players.w.taken && st.players.b.taken;
       el.className = 'clock' + (act?' act':'') + (c[col] < 20000 ? ' low' : '');
-      // pēdējās 10 sekundēs tikšķis katru sekundi
-      if(act && col === S.me && c[col] < 10000 && c[col] > 0){
-        const s = Math.ceil(c[col]/1000);
-        if(s !== S.lastTick){ S.lastTick = s; sound.tick(); }
-      }
+      // viens brīdinājums, kad paliek 10 sekundes
+      if(act && col === S.me && c[col] < 10000 && c[col] > 0 && !S.warned){ S.warned = true; sound.tick(); }
+      if(c[col] >= 10000 && col === S.me) S.warned = false;
     });
     if(c && st.running && !st.result && !S.flagSent){
       const t = S.chess.turn();
@@ -915,7 +896,7 @@ function initGame(id){
       const c = new Chess();
       try{ for(const u of st.moves) c.move({from:u.slice(0,2), to:u.slice(2,4), promotion:u[4]}); }catch{}
       S.chess = c; S.sel = null; S.targets = [];
-      if(isNext){ anim = true; if(live()) playFor(c.history({verbose:true}).pop(), c); }
+      if(isNext){ anim = true; if(live()){ const lm = c.history({verbose:true}).pop(); playFor(lm, c, lm.color === S.me); } }
       if(S.view !== null && S.view > c.history().length) S.view = null;
       if(st.moves.length === 0 && local.length > 0){ S.view = null; sound.start(); }
       S.minPly = 0;
