@@ -48,6 +48,7 @@ class Game:
         self.reset()
 
     def reset(self):
+        self.gen = getattr(self, "gen", 0) + 1
         self.moves = []
         self.clock = {"w": self.minutes * 60000, "b": self.minutes * 60000}
         self.last_move_at = None
@@ -107,6 +108,7 @@ class Game:
         return {
             "id": self.id,
             "v": self.version,
+            "gen": self.gen,
             "moves": self.moves,
             "minutes": self.minutes,
             "inc": self.inc,

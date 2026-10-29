@@ -58,6 +58,17 @@ header .sp{flex:1}
 .big:active{transform:translateY(3px);box-shadow:0 1px 0 #5d8a32}
 .big:disabled{opacity:.6}
 
+:root{--arrow:rgba(255,170,0,.82);--pre:rgba(214,79,60,.55)}
+.hbtn{width:36px;height:36px;border-radius:9px;background:var(--panel2);font-size:17px;display:grid;place-items:center;transition:.15s}
+.hbtn:hover{background:#45413a;transform:translateY(-1px)}
+.sq{transition:background-color .25s}
+.sq.pre::before{content:"";position:absolute;inset:0;background:var(--pre)}
+piece.ghosted{opacity:.55}
+#marks,#fx{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:6}
+#fx{z-index:40}
+.anim{transition:transform .2s cubic-bezier(.25,.8,.35,1)!important}
+piece.ghost{filter:drop-shadow(0 8px 10px rgba(0,0,0,.45));transform:scale(1.12)!important}
+.mine piece.me:hover{filter:brightness(1.06)}
 #home{align-items:start}
 .leftcol{display:grid;gap:22px;min-width:0}
 .hint{color:var(--muted);font-size:13px;margin:8px 0 0}
@@ -188,6 +199,8 @@ footer a{color:#6b665e}
   <a class="logo" href="/"><span>♞</span>Gambīts</a>
   <div class="sp"></div>
   <div class="pill" id="hdrinfo">Šahs ar draugu</div>
+  <button class="hbtn" id="btheme" title="Galdiņa krāsa" aria-label="Mainīt galdiņa krāsu">🎨</button>
+  <button class="hbtn" id="bmute" title="Skaņa" aria-label="Ieslēgt vai izslēgt skaņu">🔊</button>
 </header>
 
 <!-- SĀKUMLAPA -->
@@ -241,6 +254,8 @@ footer a{color:#6b665e}
     <div class="pbar" id="ptop"></div>
     <div class="boardwrap" id="bwrap">
       <div id="board"></div>
+      <svg id="marks" viewBox="0 0 8 8" aria-hidden="true"></svg>
+      <canvas id="fx" aria-hidden="true"></canvas>
       <div class="overlay hidden" id="ov"></div>
     </div>
     <div class="pbar" id="pbot"></div>
@@ -302,40 +317,127 @@ async function api(path, body){
 }
 
 /* ---------- skaņas (bez failiem, ģenerētas) ---------- */
-let actx;
-function unlockAudio(){ try{ actx = actx || new AudioContext(); actx.resume(); }catch{} }
-addEventListener('pointerdown', unlockAudio);
-function knock(freq, dur, vol){
-  if(!actx) return;
-  const t = actx.currentTime, len = Math.floor(actx.sampleRate*dur);
-  const buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
-  for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, 4);
-  const src = actx.createBufferSource(); src.buffer = buf;
-  const f = actx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=freq; f.Q.value=1.2;
-  const g = actx.createGain(); g.gain.value = vol;
-  src.connect(f).connect(g).connect(actx.destination); src.start(t);
+let actx, master, noiseBuf;
+let muted = store.get('gambits:mute') === '1';
+function unlockAudio(){
+  try{
+    if(!actx){
+      actx = new AudioContext();
+      const comp = actx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.ratio.value = 4;
+      master = actx.createGain(); master.gain.value = .9;
+      master.connect(comp).connect(actx.destination);
+      // īsa telpas atbalss, lai skaņa neizklausās „sausa”
+      const len = actx.sampleRate * .35;
+      noiseBuf = actx.createBuffer(1, actx.sampleRate * .2, actx.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for(let i=0;i<nd.length;i++) nd[i] = Math.random()*2-1;
+      const ir = actx.createBuffer(2, len, actx.sampleRate);
+      for(let ch=0;ch<2;ch++){ const d = ir.getChannelData(ch); for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, 3) * .5; }
+      const rev = actx.createConvolver(); rev.buffer = ir;
+      const wet = actx.createGain(); wet.gain.value = .16;
+      master.connect(rev).connect(wet).connect(comp);
+    }
+    actx.resume();
+  }catch{}
 }
-function tone(freq, start, dur){
-  if(!actx) return;
-  const t = actx.currentTime + start;
-  const o = actx.createOscillator(), g = actx.createGain();
-  o.type='sine'; o.frequency.value=freq;
-  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.18,t+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
-  o.connect(g).connect(actx.destination); o.start(t); o.stop(t+dur+0.05);
+addEventListener('pointerdown', unlockAudio);
+const ready = () => actx && !muted;
+function env(g, t, peak, attack, decay){
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+}
+/* koka figūra uz koka galdiņa: trokšņa uzsitiens + koka rezonanses + zems pamats */
+function clack(delay = 0, pitch = 1, vol = 1){
+  if(!ready()) return;
+  const t = actx.currentTime + delay;
+  const n = actx.createBufferSource(); n.buffer = noiseBuf; n.playbackRate.value = pitch;
+  const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 900;
+  const bp = actx.createBiquadFilter(); bp.type = 'peaking'; bp.frequency.value = 3200*pitch; bp.gain.value = 6;
+  const ng = actx.createGain(); env(ng, t, .55*vol, .001, .028);
+  n.connect(hp).connect(bp).connect(ng).connect(master); n.start(t); n.stop(t + .06);
+  [[620, .09, .3], [1450, .055, .16], [2630, .035, .09], [3900, .02, .05]].forEach(([f, d, a]) => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.frequency.value = f * pitch * (1 + (Math.random()-.5)*.03);
+    env(g, t, a*vol, .0015, d);
+    o.connect(g).connect(master); o.start(t); o.stop(t + d + .02);
+  });
+  const b = actx.createOscillator(), bg = actx.createGain();
+  b.frequency.setValueAtTime(170*pitch, t); b.frequency.exponentialRampToValueAtTime(70, t + .08);
+  env(bg, t, .5*vol, .002, .09);
+  b.connect(bg).connect(master); b.start(t); b.stop(t + .12);
+}
+function bell(freq, delay = 0, dur = .6, vol = .16, type = 'sine'){
+  if(!ready()) return;
+  const t = actx.currentTime + delay;
+  [[1, 1], [2.01, .35], [3.02, .12]].forEach(([m, a]) => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = freq * m;
+    env(g, t, vol*a, .008, dur / m);
+    o.connect(g).connect(master); o.start(t); o.stop(t + dur + .05);
+  });
 }
 const sound = {
-  move(){ knock(1800,.07,1.6) },
-  capture(){ knock(900,.11,2.4); knock(2400,.05,.8) },
-  check(){ knock(1800,.07,1.6); tone(880,.02,.18) },
-  start(){ tone(523,0,.15); tone(784,.12,.25) },
-  end(){ tone(784,0,.18); tone(523,.16,.35) },
+  move(){ clack(0, 1, 1) },
+  capture(){ clack(0, .82, 1.25); clack(.035, 1.18, .55) },
+  castle(){ clack(0, 1, .95); clack(.12, 1.08, .8) },
+  promote(){ clack(0, 1, 1); bell(784, .05, .4, .1); bell(1175, .13, .5, .1) },
+  check(){ clack(0, 1.05, 1); bell(1320, .03, .45, .09, 'triangle') },
+  premove(){ clack(0, 1.4, .35) },
+  start(){ bell(523, 0, .5, .12); bell(784, .12, .7, .12) },
+  win(){ [523, 659, 784, 1047].forEach((f, i) => bell(f, i*.11, .8, .12, 'triangle')) },
+  lose(){ [659, 523, 440].forEach((f, i) => bell(f, i*.16, .8, .11)) },
+  draw(){ bell(659, 0, .6, .11); bell(659, .18, .7, .09) },
+  notify(){ bell(880, 0, .4, .1); bell(1175, .1, .5, .1) },
+  tick(){ if(!ready()) return; const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = 1900; env(g, t, .12, .001, .03); o.connect(g).connect(master); o.start(t); o.stop(t + .05); },
 };
 function playFor(m, pos){
   if(!m) return;
   if(pos.inCheck()) sound.check();
+  else if(m.promotion) sound.promote();
+  else if(m.flags.includes('k') || m.flags.includes('q')) sound.castle();
   else if(m.captured) sound.capture();
   else sound.move();
 }
+
+/* konfeti uzvarai */
+function confetti(){
+  const cv = document.getElementById('fx'); if(!cv || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = r.width*dpr; cv.height = r.height*dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  const cols = ['#86b04f','#f2c46b','#ece7de','#e0574b','#6fa8dc'];
+  const ps = Array.from({length: 140}, () => ({x: r.width/2, y: r.height*.55, vx: (Math.random()-.5)*9, vy: -Math.random()*11-4, s: 4+Math.random()*5, c: cols[Math.random()*cols.length|0], a: Math.random()*6, va: (Math.random()-.5)*.3}));
+  let f = 0;
+  (function tick(){
+    ctx.clearRect(0, 0, r.width, r.height);
+    for(const p of ps){ p.vy += .28; p.vx *= .99; p.x += p.vx; p.y += p.vy; p.a += p.va;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.fillStyle = p.c; ctx.globalAlpha = Math.max(0, 1 - f/110); ctx.fillRect(-p.s/2, -p.s/4, p.s, p.s/2); ctx.restore(); }
+    if(++f < 110) requestAnimationFrame(tick); else ctx.clearRect(0, 0, r.width, r.height);
+  })();
+}
+
+/* galdiņa krāsas */
+const THEMES = [['Koks','#efdcbc','#ad8462'], ['Zaļš','#eeeed2','#769656'], ['Zils','#dee3e6','#8ca2ad'], ['Ceriņu','#e8e0f0','#9277b0'], ['Marmors','#e6e1d8','#8b8378']];
+let theme = +(store.get('gambits:theme') || 0) % THEMES.length;
+function applyTheme(){
+  const [, l, d] = THEMES[theme];
+  document.documentElement.style.setProperty('--light', l);
+  document.documentElement.style.setProperty('--dark', d);
+}
+applyTheme();
+document.getElementById('btheme').onclick = () => {
+  theme = (theme + 1) % THEMES.length; store.set('gambits:theme', theme); applyTheme();
+  toast('Galdiņš: ' + THEMES[theme][0]);
+};
+const muteBtn = document.getElementById('bmute');
+muteBtn.textContent = muted ? '🔇' : '🔊';
+muteBtn.onclick = () => {
+  muted = !muted; store.set('gambits:mute', muted ? '1' : '0');
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+  if(!muted){ unlockAudio(); sound.move(); }
+};
 
 /* ---------- identitāte, draugi, izaicinājumi ---------- */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -523,7 +625,7 @@ function initGame(id){
     id, token: ME.secret, me: null,
     st: null, v: -1, chess: new Chess(), view: null, flip: false,
     sel: null, targets: [], pending: false, recvAt: 0, flagSent: false, chatN: 0,
-    promo: null, ended: false,
+    promo: null, ended: false, gen: null, minPly: 0, premove: null, marks: [],
   };
   const link = location.origin + '/g/' + id;
   let squares = {};
@@ -574,8 +676,9 @@ function initGame(id){
       for(const row of pos.board()) for(const p of row) if(p && p.type==='k' && p.color===t) chk = p.square;
     }
     const tg = new Map(S.targets.map(m => [m.to, m]));
-    const canMove = myTurn();
+    const canMove = myTurn() || canPremove();
     $('#bwrap').classList.toggle('mine', canMove);
+    const pm = live() ? S.premove : null;
     for(const [sq, d] of Object.entries(squares)){
       d.querySelector('piece')?.remove();
       const p = pos.get(sq);
@@ -585,7 +688,14 @@ function initGame(id){
       d.classList.toggle('chk', chk===sq);
       d.classList.toggle('tgt', tg.has(sq));
       d.classList.toggle('cap', tg.has(sq) && (!!p || tg.get(sq).flags.includes('e')));
+      d.classList.toggle('pre', !!pm && (pm.from===sq || pm.to===sq));
     }
+    // priekšgājienā figūru rāda jau mērķa lauciņā
+    if(pm){
+      const a = squares[pm.from].querySelector('piece');
+      if(a){ squares[pm.to].querySelector('piece')?.remove(); squares[pm.to].appendChild(a); a.classList.add('ghosted'); }
+    }
+    drawMarks();
     if(anim && last){
       const e = squares[last.to].querySelector('piece');
       const [fx,fy] = coords(last.from), [tx,ty] = coords(last.to);
@@ -601,6 +711,21 @@ function initGame(id){
           requestAnimationFrame(()=>requestAnimationFrame(()=>{ re.classList.add('anim'); re.style.transform=''; })); }
       }
     }
+  }
+
+  function drawMarks(){
+    const svg = $('#marks'); if(!svg) return;
+    const c = sq => { const [x, y] = coords(sq); return [x + .5, y + .5]; };
+    let html = '<defs><marker id="ah" markerWidth="4" markerHeight="4" refX="2.2" refY="2" orient="auto"><path d="M0,0 L4,2 L0,4 z" fill="var(--arrow)"/></marker></defs>';
+    for(const m of S.marks){
+      if(m[0] === 'c'){ const [x, y] = c(m.slice(1)); html += `<circle cx="${x}" cy="${y}" r=".44" fill="none" stroke="var(--arrow)" stroke-width=".07"/>`; }
+      else {
+        const [x1, y1] = c(m.slice(1,3)), [x2, y2] = c(m.slice(3,5));
+        const len = Math.hypot(x2-x1, y2-y1), k = (len - .32) / len;
+        html += `<line x1="${x1}" y1="${y1}" x2="${x1+(x2-x1)*k}" y2="${y1+(y2-y1)*k}" stroke="var(--arrow)" stroke-width=".17" stroke-linecap="round" marker-end="url(#ah)"/>`;
+      }
+    }
+    svg.innerHTML = html;
   }
 
   function material(pos){
@@ -660,6 +785,11 @@ function initGame(id){
       el.textContent = fmt(c[col]);
       const act = !st.result && S.chess.turn()===col && st.players.w.taken && st.players.b.taken;
       el.className = 'clock' + (act?' act':'') + (c[col] < 20000 ? ' low' : '');
+      // pēdējās 10 sekundēs tikšķis katru sekundi
+      if(act && col === S.me && c[col] < 10000 && c[col] > 0){
+        const s = Math.ceil(c[col]/1000);
+        if(s !== S.lastTick){ S.lastTick = s; sound.tick(); }
+      }
     });
     if(c && st.running && !st.result && !S.flagSent){
       const t = S.chess.turn();
@@ -774,10 +904,13 @@ function initGame(id){
     const prev = S.st;
     S.st = st; S.recvAt = performance.now(); S.flagSent = false;
     if(st.you !== undefined && st.you !== S.me && S.token){ S.me = st.you; buildBoard(); }
+    if(st.gen !== S.gen){ S.gen = st.gen; S.minPly = 0; S.premove = null; S.marks = []; }
     const local = S.chess.history({verbose:true}).map(m => m.from+m.to+(m.promotion||''));
     const same = local.length === st.moves.length && local.every((m,i)=>m===st.moves[i]);
+    // serveris vēl nav redzējis manu gājienu: neatceļ to un neanimē otrreiz
+    const stale = st.moves.length < S.minPly;
     let anim = false;
-    if(!same && !S.pending){
+    if(!same && !S.pending && !stale){
       const isNext = st.moves.length === local.length+1 && local.every((m,i)=>m===st.moves[i]);
       const c = new Chess();
       try{ for(const u of st.moves) c.move({from:u.slice(0,2), to:u.slice(2,4), promotion:u[4]}); }catch{}
@@ -785,12 +918,52 @@ function initGame(id){
       if(isNext){ anim = true; if(live()) playFor(c.history({verbose:true}).pop(), c); }
       if(S.view !== null && S.view > c.history().length) S.view = null;
       if(st.moves.length === 0 && local.length > 0){ S.view = null; sound.start(); }
+      S.minPly = 0;
     }
-    if(prev && !prev.result && st.result){ S.showResult = true; sound.end(); }
+    if(prev && prev.result && !st.result) sound.start();
+    if(prev && !prev.result && st.result){
+      S.showResult = true; S.premove = null;
+      const won = S.me && ((st.result==='1-0' && S.me==='w') || (st.result==='0-1' && S.me==='b'));
+      const lost = S.me && !won && st.result !== '1/2-1/2' && st.result !== '*';
+      won ? sound.win() : lost ? sound.lose() : sound.draw();
+      if(won) confetti();
+    }
     if(!st.result) S.showResult = false;
     if(prev && !(prev.players.w.taken && prev.players.b.taken) && st.players.w.taken && st.players.b.taken){ sound.start(); toast('Pretinieks pievienojās!'); }
-    if(prev && st.drawOffer && st.drawOffer !== S.me && prev.drawOffer !== st.drawOffer) toast('Pretinieks piedāvā neizšķirtu');
+    if(prev && st.drawOffer && st.drawOffer !== S.me && prev.drawOffer !== st.drawOffer){ sound.notify(); toast('Pretinieks piedāvā neizšķirtu'); }
     drawAll(anim);
+    if(anim && S.premove) setTimeout(runPremove, 180);
+  }
+
+  /* --- priekšgājiens: gājiens, ko ievada, kamēr pretinieks domā --- */
+  function premoveTargets(sq){
+    const fen = S.chess.fen().split(' ');
+    fen[1] = S.me; fen[3] = '-';
+    try{
+      const c = new Chess(fen.join(' '), {skipValidation:true});
+      const ms = c.moves({square:sq, verbose:true});
+      // bandinieks var premove sist pa diagonāli arī tad, ja tur vēl nav figūras
+      const p = c.get(sq);
+      if(p && p.type === 'p'){
+        const dir = S.me === 'w' ? 1 : -1, f = sq.charCodeAt(0), r = +sq[1] + dir;
+        for(const df of [-1, 1]){
+          const to = String.fromCharCode(f+df) + r;
+          if(r>=1 && r<=8 && f+df>=97 && f+df<=104 && !ms.some(m=>m.to===to)) ms.push({from:sq, to, flags:'c'});
+        }
+      }
+      return ms;
+    }catch{ return []; }
+  }
+  function canPremove(){
+    const st = S.st;
+    return !!(st && S.me && !st.result && live() && S.chess.turn() !== S.me && st.players.w.taken && st.players.b.taken);
+  }
+  function runPremove(){
+    const pm = S.premove; S.premove = null;
+    if(!pm || !myTurn()){ drawBoard(false); return; }
+    const opts = S.chess.moves({square:pm.from, verbose:true}).filter(m => m.to === pm.to);
+    if(!opts.length){ drawBoard(false); return; }
+    doMove(pm.from, pm.to, opts.some(m => m.promotion) ? 'q' : undefined, true);
   }
 
   function myTurn(){
@@ -802,14 +975,20 @@ function initGame(id){
   /* --- gājieni --- */
   function select(sq){
     S.sel = sq;
-    S.targets = sq ? S.chess.moves({square:sq, verbose:true}) : [];
+    S.targets = !sq ? [] : myTurn() ? S.chess.moves({square:sq, verbose:true}) : premoveTargets(sq);
     drawBoard(false);
   }
-  function tryMove(from, to){
+  function tryMove(from, to, animate){
+    if(!myTurn()){
+      if(!premoveTargets(from).some(m => m.to === to)) return false;
+      S.premove = {from, to}; S.sel = null; S.targets = [];
+      sound.premove(); drawBoard(false);
+      return true;
+    }
     const opts = S.chess.moves({square:from, verbose:true}).filter(m => m.to === to);
     if(!opts.length) return false;
     if(opts.some(m => m.promotion)){ askPromo(from, to); return true; }
-    doMove(from, to);
+    doMove(from, to, undefined, animate);
     return true;
   }
   function askPromo(from, to){
@@ -826,10 +1005,10 @@ function initGame(id){
     $('#bwrap').appendChild(box);
     S.promo = box;
   }
-  function doMove(from, to, promotion){
+  function doMove(from, to, promotion, animate){
     let m;
     try{ m = S.chess.move({from, to, promotion}); }catch{ return; }
-    S.sel = null; S.targets = [];
+    S.sel = null; S.targets = []; S.marks = [];
     playFor(m, S.chess);
     let end = null;
     if(S.chess.isCheckmate()) end = {result: S.me==='w'?'1-0':'0-1', reason:'mats'};
@@ -838,20 +1017,32 @@ function initGame(id){
     else if(S.chess.isThreefoldRepetition()) end = {result:'1/2-1/2', reason:'atkārtošanās'};
     else if(S.chess.isDraw()) end = {result:'1/2-1/2', reason:'50 gājieni'};
     S.pending = true;
-    drawBoard(false); drawMoves(); drawStatus(); drawBars();
+    S.minPly = S.chess.history().length;
+    drawBoard(!!animate); drawMoves(); drawStatus(); drawBars();
+    const resync = msg => { toast(msg); S.minPly = 0; S.chess = new Chess(); S.v = -1; if(S.st) applyState(S.st); };
     api('/api/move', {id:S.id, token:S.token, uci: from+to+(promotion||''), ply: S.chess.history().length-1, end})
-      .then(r => { if(r.error) toast(r.error); })
-      .catch(() => toast('Savienojuma kļūda'))
-      .finally(() => { S.pending = false; if(S.st) applyState(S.st); });
+      .then(r => { S.pending = false; if(r.error) resync(r.error); })
+      .catch(() => { S.pending = false; resync('Savienojuma kļūda'); });
   }
 
   /* --- vilkšana un klikšķi --- */
-  let drag = null;
+  let drag = null, rdrag = null;
+  $('#board').addEventListener('contextmenu', e => e.preventDefault());
   $('#board').addEventListener('pointerdown', e => {
     if(S.promo){ S.promo.remove(); S.promo = null; drawBoard(false); }
     const sq = sqAt(e.clientX, e.clientY); if(!sq) return;
-    if(!myTurn()){ if(S.sel) select(null); return; }
-    if(S.sel && S.sel !== sq && tryMove(S.sel, sq)) return;
+    if(e.button === 2){
+      // labā poga: bultas un iezīmes, kā analīzes dēlī
+      if(S.premove){ S.premove = null; drawBoard(false); return; }
+      rdrag = {from: sq};
+      return;
+    }
+    if(e.button !== 0) return;
+    if(S.marks.length){ S.marks = []; drawMarks(); }
+    const active = myTurn() || canPremove();
+    if(!active){ if(S.sel) select(null); return; }
+    if(S.premove && !S.sel){ S.premove = null; drawBoard(false); }
+    if(S.sel && S.sel !== sq && tryMove(S.sel, sq, true)) return;
     const p = S.chess.get(sq);
     if(p && p.color === S.me){
       const again = S.sel === sq;
@@ -861,26 +1052,40 @@ function initGame(id){
       const size = $('#board').clientWidth / 8;
       g.style.width = g.style.height = size + 'px';
       g.style.left = (e.clientX - size/2) + 'px'; g.style.top = (e.clientY - size/2) + 'px';
-      document.body.appendChild(g); src.classList.add('dragging');
-      drag = {from: sq, g, src, size, again, moved: false, hover: null};
+      g.style.opacity = '0';
+      document.body.appendChild(g);
+      drag = {from: sq, g, src, size, again, moved: false, hover: null, x: e.clientX, y: e.clientY};
       $('#board').setPointerCapture(e.pointerId);
     } else select(null);
   });
   $('#board').addEventListener('pointermove', e => {
     if(!drag) return;
+    // mazs pirksta trīcējums vēl nav vilkšana
+    if(!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 4) return;
+    if(!drag.moved){ drag.g.style.opacity = ''; drag.src?.classList.add('dragging'); }
     drag.moved = true;
     drag.g.style.left = (e.clientX - drag.size/2) + 'px'; drag.g.style.top = (e.clientY - drag.size/2) + 'px';
     const sq = sqAt(e.clientX, e.clientY);
     if(sq !== drag.hover){ drag.hover && squares[drag.hover]?.classList.remove('hov'); drag.hover = sq; sq && squares[sq].classList.add('hov'); }
   });
   const endDrag = e => {
+    if(rdrag && e.type === 'pointerup' && e.button === 2){
+      const to = sqAt(e.clientX, e.clientY), from = rdrag.from; rdrag = null;
+      if(to){
+        const key = from === to ? 'c'+from : 'a'+from+to;
+        const i = S.marks.indexOf(key);
+        i >= 0 ? S.marks.splice(i, 1) : S.marks.push(key);
+        drawMarks();
+      }
+      return;
+    }
     if(!drag) return;
     const d = drag; drag = null;
-    d.g.remove(); d.src.classList.remove('dragging');
+    d.g.remove(); d.src?.classList.remove('dragging');
     d.hover && squares[d.hover]?.classList.remove('hov');
     const sq = e.type === 'pointerup' ? sqAt(e.clientX, e.clientY) : null;
-    if(sq && sq !== d.from){ if(!tryMove(d.from, sq)) drawBoard(false); }
-    else if(sq === d.from && d.again && d.moved === false) select(null);
+    if(sq && sq !== d.from && d.moved){ if(!tryMove(d.from, sq, false)){ S.sel = null; S.targets = []; drawBoard(false); } }
+    else if(sq === d.from && d.again && !d.moved) select(null);
   };
   $('#board').addEventListener('pointerup', endDrag);
   $('#board').addEventListener('pointercancel', endDrag);
